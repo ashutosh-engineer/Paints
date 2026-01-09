@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Kubti Hardware & Paints",
+    "slug": "kubti-hardware-paints",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "description": "Professional paint and hardware solutions for your construction and renovation needs. Featuring premium Birla Opus paint collections.",
+    "icon": "./assets/kubti.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/kubti.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/kubti.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/kubti.png"
+    }
+  }
+}
