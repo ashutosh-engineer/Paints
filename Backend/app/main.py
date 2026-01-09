@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session, joinedload
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, AsyncGenerator
 import time
 import json
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 from .database import engine, get_db, Base
@@ -23,21 +25,35 @@ from .auth import (
     get_password_hash, verify_password, create_access_token, decode_token
 )
 
-# Database Connection Check
-try:
-    with engine.connect() as connection:
-        print("\n" + "="*50)
-        print("✅  DATABASE CONNECTED SUCCESSFULLY!")
-        print("    Connection string used (masked): " + str(engine.url).split("@")[-1])
-        print("="*50 + "\n")
-except Exception as e:
-    print("\n" + "="*50)
-    print("❌  DATABASE CONNECTION FAILED!")
-    print(f"Error: {e}")
-    print("="*50 + "\n")
-
-# Create database tables
-Base.metadata.create_all(bind=engine)
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # Startup
+    try:
+        # 1. Check Database connection asynchronously or in thread
+        try:
+             # run_in_threadpool allows this sync operation to not block the async event loop
+             def check_db():
+                 with engine.connect() as connection:
+                    print("\n✅  DATABASE CONNECTED")
+             
+             await run_in_threadpool(check_db)
+        except Exception:
+             print("\n⚠️  DB CONNECTION PENDING (Will retry on request)")
+        
+        # 2. Key Step: Ensure tables
+        # Use run_in_threadpool to execute sync Base.metadata.create_all preventing loop blocking
+        try:
+            await run_in_threadpool(Base.metadata.create_all, bind=engine)
+        except Exception as e:
+            print(f"⚠️  Table creation skipped or failed: {e}")
+            
+    except Exception as e:
+        print(f"Server Startup Warning: {e}")
+    
+    yield
+    
+    # Shutdown
+    print("Shutting down...")
 
 # API Documentation Metadata
 tags_metadata = [
@@ -48,8 +64,7 @@ tags_metadata = [
     {
         "name": "Authentication",
         "description": "User registration and login operations. Get JWT tokens for accessing protected endpoints.",
-    },
-    {
+    },    {
         "name": "User Profile",
         "description": "Manage user profile information, location, and account settings. **Authentication required.**",
     },
@@ -81,6 +96,7 @@ tags_metadata = [
 
 app = FastAPI(
     title="Birla Opus E-Commerce API",
+    lifespan=lifespan,
     description="""
 ## Professional E-Commerce Platform API
 
@@ -1624,100 +1640,114 @@ def create_order(
         except:
             return 0
     
-    for cart_item in cart_items:
-        product = db.query(Product).filter(Product.id == cart_item.product_id).first()
+    # Track locked products to avoid refetching and ensure atomicity
+    locked_products = {}
+
+    try:
+        for cart_item in cart_items:
+            # Lock the product row for update to prevent race conditions
+            # with_for_update() ensures that other transactions cannot modify stock 
+            # until this transaction commits or rolls back
+            product = db.query(Product).filter(Product.id == cart_item.product_id).with_for_update().first()
+            
+            if not product or not product.is_active:
+                raise HTTPException(status_code=400, detail=f"Product {cart_item.product_id} not available")
+            
+            if product.stock < cart_item.quantity:
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for {product.name}")
+            
+            locked_products[cart_item.product_id] = product
+            
+            # Calculate original price (before discount)
+            item_original_price = product.original_price if product.original_price else product.price
+            
+            # Calculate discounted price
+            discount_percent = 0
+            if product.original_price and product.original_price > product.price:
+                discount_percent = int(((product.original_price - product.price) / product.original_price) * 100)
+            
+            discounted_price = product.price
+            
+            # Calculate totals
+            item_total = discounted_price * cart_item.quantity
+            item_original_total = item_original_price * cart_item.quantity
+            item_discount = item_original_total - item_total
+            
+            total_amount += item_total
+            original_amount += item_original_total
+            discount_amount += item_discount
+            
+            # Calculate points for this item - use selected_size if available, else product.size
+            size_to_use = cart_item.selected_size if cart_item.selected_size else product.size
+            if size_to_use:
+                points_per_item = calculate_points_from_size(size_to_use)
+                total_points += points_per_item * cart_item.quantity
+            
+            order_items_data.append({
+                "product_id": product.id,
+                "product_name": product.name,
+                "quantity": cart_item.quantity,
+                "price_at_purchase": 0.0,
+                "original_price": 0.0,
+                "discount_percent": 0,
+                "size_ordered": size_to_use
+            })
         
-        if not product or not product.is_active:
-            raise HTTPException(status_code=400, detail=f"Product {cart_item.product_id} not available")
+        # Create order
+        from datetime import datetime
+        now = datetime.now()
+        order_number = f"ORD{now.strftime('%Y%m%d%H%M%S%f')}{current_user.id}"
         
-        if product.stock < cart_item.quantity:
-            raise HTTPException(status_code=400, detail=f"Insufficient stock for {product.name}")
-        
-        # Calculate original price (before discount)
-        item_original_price = product.original_price if product.original_price else product.price
-        
-        # Calculate discounted price
-        discount_percent = 0
-        if product.original_price and product.original_price > product.price:
-            discount_percent = int(((product.original_price - product.price) / product.original_price) * 100)
-        
-        discounted_price = product.price
-        
-        # Calculate totals
-        item_total = discounted_price * cart_item.quantity
-        item_original_total = item_original_price * cart_item.quantity
-        item_discount = item_original_total - item_total
-        
-        total_amount += item_total
-        original_amount += item_original_total
-        discount_amount += item_discount
-        
-        # Calculate points for this item - use selected_size if available, else product.size
-        size_to_use = cart_item.selected_size if cart_item.selected_size else product.size
-        if size_to_use:
-            points_per_item = calculate_points_from_size(size_to_use)
-            total_points += points_per_item * cart_item.quantity
-        
-        order_items_data.append({
-            "product_id": product.id,
-            "product_name": product.name,
-            "quantity": cart_item.quantity,
-            "price_at_purchase": 0.0,
-            "original_price": 0.0,
-            "discount_percent": 0,
-            "size_ordered": size_to_use
-        })
-    
-    # Create order
-    from datetime import datetime
-    now = datetime.now()
-    order_number = f"ORD{now.strftime('%Y%m%d%H%M%S%f')}{current_user.id}"
-    
-    db_order = Order(
-        user_id=current_user.id,
-        order_number=order_number,
-        total_amount=0.0,
-        original_amount=0.0,
-        discount_amount=0.0,
-        status="pending",
-        delivery_address=order_data.delivery_address,
-        delivery_city=order_data.delivery_city,
-        delivery_state=order_data.delivery_state,
-        delivery_pincode=order_data.delivery_pincode,
-        delivery_phone=order_data.delivery_phone,
-        order_date=now.strftime('%d-%m-%Y'),
-        order_time=now.strftime('%I:%M %p'),
-        order_day=now.strftime('%A'),
-        points_earned=total_points
-    )
-    db.add(db_order)
-    db.commit()
-    db.refresh(db_order)
-    
-    # Create order items and update stock
-    for item_data in order_items_data:
-        order_item = OrderItem(
-            order_id=db_order.id,
-            **item_data
+        db_order = Order(
+            user_id=current_user.id,
+            order_number=order_number,
+            total_amount=0.0,
+            original_amount=0.0,
+            discount_amount=0.0,
+            status="pending",
+            delivery_address=order_data.delivery_address,
+            delivery_city=order_data.delivery_city,
+            delivery_state=order_data.delivery_state,
+            delivery_pincode=order_data.delivery_pincode,
+            delivery_phone=order_data.delivery_phone,
+            order_date=now.strftime('%d-%m-%Y'),
+            order_time=now.strftime('%I:%M %p'),
+            order_day=now.strftime('%A'),
+            points_earned=total_points
         )
-        db.add(order_item)
+        db.add(db_order)
+        # Flush to get the ID but don't commit yet
+        db.flush()
         
-        # Update product stock and sales count
-        product = db.query(Product).filter(Product.id == item_data["product_id"]).first()
-        product.stock -= item_data["quantity"]
-        product.sales_count += item_data["quantity"]
-    
-    # Award points to user
-    if total_points > 0:
-        current_user.points = (current_user.points or 0) + total_points
-    
-    # Clear cart
-    db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
-    
-    db.commit()
-    db.refresh(db_order)
-    
-    return db_order
+        # Create order items and update stock using locked products
+        for item_data in order_items_data:
+            order_item = OrderItem(
+                order_id=db_order.id,
+                **item_data
+            )
+            db.add(order_item)
+            
+            # Update product stock and sales count safely using locked instance
+            product = locked_products.get(item_data["product_id"])
+            if product:
+                product.stock -= item_data["quantity"]
+                product.sales_count += item_data["quantity"]
+        
+        # Award points to user
+        if total_points > 0:
+            current_user.points = (current_user.points or 0) + total_points
+        
+        # Clear cart
+        db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
+        
+        db.commit()
+        db.refresh(db_order)
+        
+        return db_order
+
+    except Exception as e:
+        db.rollback()
+        raise e
 
 @app.post(
     "/api/orders/direct",
