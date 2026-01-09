@@ -100,8 +100,10 @@ export default function OrdersScreen({ navigation }) {
         return '#ff9800';
       case 'confirmed':
         return '#2196f3';
-      case 'shipped':
+      case 'processing':
         return '#9c27b0';
+      case 'shipped':
+        return '#00bcd4';
       case 'delivered':
         return '#388e3c';
       case 'cancelled':
@@ -114,7 +116,8 @@ export default function OrdersScreen({ navigation }) {
   const getStatusLabel = (status) => {
     const labels = {
       pending: 'Order Placed',
-      confirmed: 'Order Confirmed',
+      confirmed: 'Confirmed',
+      processing: 'Processing',
       shipped: 'Shipped',
       delivered: 'Delivered',
       cancelled: 'Cancelled'

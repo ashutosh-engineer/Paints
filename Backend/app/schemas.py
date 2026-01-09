@@ -46,6 +46,17 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     email: Optional[str] = None
 
+# Admin Change Password
+class AdminChangePassword(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6)
+    
+    @validator('new_password')
+    def validate_new_password(cls, v):
+        if len(v) < 6:
+            raise ValueError('New password must be at least 6 characters')
+        return v
+
 # User Profile Update
 class UserProfileUpdate(BaseModel):
     full_name: Optional[str] = Field(None, max_length=100)
@@ -144,6 +155,24 @@ class AdminUserUpdate(BaseModel):
     phone: Optional[str] = None
     is_admin: Optional[bool] = None
     is_profile_complete: Optional[bool] = None
+
+# Create Admin User
+class AdminCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=6, max_length=100)
+    full_name: str = Field(..., min_length=1, max_length=100)
+    
+    @validator('password')
+    def validate_password(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters long')
+        return v
+    
+    @validator('full_name')
+    def validate_full_name(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Full name is required')
+        return v.strip()
 
 # Category Schemas
 class CategoryCreate(BaseModel):
@@ -295,6 +324,7 @@ class OrderItemResponse(BaseModel):
     id: int
     product_id: Optional[int] = None
     product_name: str
+    product_image: Optional[str] = None
     quantity: int
     price_at_purchase: float
     original_price: float

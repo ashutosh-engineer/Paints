@@ -11,11 +11,13 @@ import {
   Dimensions,
   StatusBar,
   Alert,
+  TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_URL } from '../config/api';
 import FlipkartLoader from '../components/FlipkartLoader';
-import { LogoutIcon, ShoppingBagIcon } from '../components/ProfessionalIcons';
+import { LogoutIcon, ShoppingBagIcon, LockIcon } from '../components/ProfessionalIcons';
 
 const { width } = Dimensions.get('window');
 
@@ -29,6 +31,20 @@ export default function AdminDashboardScreen({ navigation }) {
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [orderModalVisible, setOrderModalVisible] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
+  
+  // Create Admin Modal State
+  const [createAdminModalVisible, setCreateAdminModalVisible] = useState(false);
+  const [newAdminEmail, setNewAdminEmail] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [creatingAdmin, setCreatingAdmin] = useState(false);
+
+  // Change Password Modal State
+  const [changePasswordModalVisible, setChangePasswordModalVisible] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
 
   useEffect(() => {
     checkAdminAccess();
@@ -61,13 +77,20 @@ export default function AdminDashboardScreen({ navigation }) {
   const loadAllData = async () => {
     try {
       const token = await AsyncStorage.getItem('access_token');
-      const headers = { 'Authorization': `Bearer ${token}` };
+      const headers = { 
+        'Authorization': `Bearer ${token}`,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+      };
+      
+      // Add timestamp to bust cache
+      const timestamp = Date.now();
 
       const [statsRes, ordersRes, usersRes, analyticsRes] = await Promise.all([
-        fetch(`${API_URL}/api/admin/stats`, { headers }),
-        fetch(`${API_URL}/api/admin/orders`, { headers }),
-        fetch(`${API_URL}/api/admin/users?limit=100`, { headers }),
-        fetch(`${API_URL}/api/admin/products/analytics`, { headers }),
+        fetch(`${API_URL}/api/admin/stats?_t=${timestamp}`, { headers }),
+        fetch(`${API_URL}/api/admin/orders?_t=${timestamp}`, { headers }),
+        fetch(`${API_URL}/api/admin/users?limit=100&_t=${timestamp}`, { headers }),
+        fetch(`${API_URL}/api/admin/products/analytics?_t=${timestamp}`, { headers }),
       ]);
 
       if (statsRes.ok) setStats(await statsRes.json());
@@ -105,15 +128,203 @@ export default function AdminDashboardScreen({ navigation }) {
     setOrderModalVisible(true);
   };
 
+  // Create Admin Function
+  const handleCreateAdmin = async () => {
+    if (!newAdminEmail || !newAdminPassword || !newAdminName) {
+      Alert.alert('Error', 'Please fill in all fields');
+      return;
+    }
+
+    if (newAdminPassword.length < 6) {
+      Alert.alert('Error', 'Password must be at least 6 characters');
+      return;
+    }
+
+    setCreatingAdmin(true);
+    try {
+      const token = await AsyncStorage.getItem('access_token');
+      const response = await fetch(`${API_URL}/api/admin/create-admin`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: newAdminEmail,
+          password: newAdminPassword,
+          full_name: newAdminName,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        Alert.alert('Success', `Admin "${newAdminName}" created successfully!`);
+        setCreateAdminModalVisible(false);
+        setNewAdminEmail('');
+        setNewAdminPassword('');
+        setNewAdminName('');
+        // Small delay to ensure backend has committed, then refresh
+        setTimeout(async () => {
+          await loadAllData();
+        }, 300);
+      } else {
+        Alert.alert('Error', data.detail || 'Failed to create admin');
+      }
+    } catch (error) {
+      console.error('Create admin error:', error);
+      Alert.alert('Error', 'Failed to connect to server');
+    } finally {
+      setCreatingAdmin(false);
+    }
+  };
+
+  // Change Password Function
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
+      Alert.alert('Error', 'Please fill in all fields');
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      Alert.alert('Error', 'New password must be at least 6 characters');
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      Alert.alert('Error', 'New passwords do not match');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const token = await AsyncStorage.getItem('access_token');
+      const response = await fetch(`${API_URL}/api/admin/change-password`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        Alert.alert('Success', 'Password changed successfully!');
+        setChangePasswordModalVisible(false);
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmNewPassword('');
+      } else {
+        Alert.alert('Error', data.detail || 'Failed to change password');
+      }
+    } catch (error) {
+      console.error('Change password error:', error);
+      Alert.alert('Error', 'Failed to connect to server');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
+  // Update Order Status Function
+  const handleUpdateOrderStatus = async (orderId, newStatus) => {
+    try {
+      const token = await AsyncStorage.getItem('access_token');
+      const response = await fetch(`${API_URL}/api/admin/orders/${orderId}/status?status=${newStatus}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        Alert.alert('Success', `Order status updated to ${newStatus}`);
+        // Update local state
+        setOrders(prevOrders => 
+          prevOrders.map(order => 
+            order.id === orderId ? { ...order, status: newStatus } : order
+          )
+        );
+        if (selectedOrder && selectedOrder.id === orderId) {
+          setSelectedOrder({ ...selectedOrder, status: newStatus });
+        }
+      } else {
+        Alert.alert('Error', data.detail || 'Failed to update order status');
+      }
+    } catch (error) {
+      console.error('Update order status error:', error);
+      Alert.alert('Error', 'Failed to connect to server');
+    }
+  };
+
   const getStatusColor = (status) => {
-    const colors = {
-      pending: '#ff9800',
-      confirmed: '#2196f3',
-      shipped: '#9c27b0',
-      delivered: '#4caf50',
-      cancelled: '#f44336',
+    switch (status) {
+      case 'pending': return '#ff9800';
+      case 'confirmed': return '#2196f3';
+      case 'processing': return '#9c27b0';
+      case 'shipped': return '#00bcd4';
+      case 'delivered': return '#4caf50';
+      case 'cancelled': return '#f44336';
+      default: return '#9e9e9e';
+    }
+  };
+
+  const getStatusLabel = (status) => {
+    const labels = {
+      pending: 'Pending',
+      confirmed: 'Confirmed',
+      processing: 'Processing',
+      shipped: 'Shipped',
+      delivered: 'Delivered',
+      cancelled: 'Cancelled'
     };
-    return colors[status] || '#9e9e9e';
+    return labels[status] || status;
+  };
+
+  // Delete User Function
+  const handleDeleteUser = async (user) => {
+    Alert.alert(
+      'Delete User',
+      `Are you sure you want to delete "${user.full_name || user.email}"?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const token = await AsyncStorage.getItem('access_token');
+              const response = await fetch(`${API_URL}/api/admin/users/${user.id}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${token}` },
+              });
+
+              const data = await response.json();
+
+              if (response.ok) {
+                Alert.alert('Success', data.message || 'User deleted successfully');
+                // Small delay to ensure backend has committed, then refresh
+                setTimeout(async () => {
+                  await loadAllData();
+                }, 300);
+              } else {
+                Alert.alert('Error', data.detail || 'Failed to delete user');
+              }
+            } catch (error) {
+              console.error('Delete user error:', error);
+              Alert.alert('Error', 'Failed to connect to server');
+            }
+          },
+        },
+      ]
+    );
   };
 
   const getOrderUser = (userId) => {
@@ -138,9 +349,14 @@ export default function AdminDashboardScreen({ navigation }) {
           <Text style={styles.headerTitle}>Admin Dashboard</Text>
           <Text style={styles.headerSubtitle}>Kubti Hardware</Text>
         </View>
-        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-          <LogoutIcon size={20} color="#fff" />
-        </TouchableOpacity>
+        <View style={styles.headerButtons}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setChangePasswordModalVisible(true)}>
+            <LockIcon size={18} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+            <LogoutIcon size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Tab Navigation */}
@@ -188,9 +404,9 @@ export default function AdminDashboardScreen({ navigation }) {
                 <Text style={styles.statValue}>{stats?.total_orders || 0}</Text>
                 <Text style={styles.statLabel}>Total Orders</Text>
               </View>
-              <View style={[styles.statCard, { borderLeftColor: '#9c27b0' }]}>
-                <Text style={styles.statValue}>{stats?.total_items_sold || 0}</Text>
-                <Text style={styles.statLabel}>Items Sold</Text>
+              <View style={[styles.statCard, { borderLeftColor: '#4caf50' }]}>
+                <Text style={styles.statValue}>{stats?.total_products || 0}</Text>
+                <Text style={styles.statLabel}>Total Products</Text>
               </View>
             </View>
 
@@ -205,7 +421,7 @@ export default function AdminDashboardScreen({ navigation }) {
               {orders.slice(0, 3).map((order) => {
                 const orderUser = getOrderUser(order.user_id);
                 const firstItem = order.order_items?.[0];
-                const productImage = firstItem?.product?.image_path;
+                const productImage = firstItem?.product_image;
                 return (
                   <TouchableOpacity
                     key={order.id}
@@ -231,6 +447,9 @@ export default function AdminDashboardScreen({ navigation }) {
                           <Text style={styles.orderMoreItems}>+{order.order_items.length - 1} more items</Text>
                         )}
                         <Text style={styles.orderUser}>By: {orderUser?.full_name || orderUser?.email || 'Unknown'}</Text>
+                      </View>
+                      <View style={[styles.orderStatusBadge, { backgroundColor: getStatusColor(order.status) }]}>
+                        <Text style={styles.orderStatusText}>{getStatusLabel(order.status)}</Text>
                       </View>
                     </View>
                   </TouchableOpacity>
@@ -260,9 +479,8 @@ export default function AdminDashboardScreen({ navigation }) {
                   )}
                   <View style={styles.productInfo}>
                     <Text style={styles.productName} numberOfLines={1}>{product.name}</Text>
-                    <Text style={styles.productSold}>{product.total_quantity_sold || 0} units sold</Text>
+                    <Text style={styles.productSold}>{product.total_orders || 0} orders</Text>
                   </View>
-                  <Text style={styles.productPrice}>₹{product.price}</Text>
                 </View>
               ))}
             </View>
@@ -278,7 +496,7 @@ export default function AdminDashboardScreen({ navigation }) {
               orders.map((order) => {
                 const orderUser = getOrderUser(order.user_id);
                 const firstItem = order.order_items?.[0];
-                const productImage = firstItem?.product?.image_path;
+                const productImage = firstItem?.product_image;
                 return (
                   <TouchableOpacity
                     key={order.id}
@@ -306,7 +524,9 @@ export default function AdminDashboardScreen({ navigation }) {
                         <Text style={styles.orderUser}>By: {orderUser?.full_name || orderUser?.email || 'Unknown'}</Text>
                         <Text style={styles.orderDate}>{new Date(order.created_at).toLocaleDateString()}</Text>
                       </View>
-                      <Text style={styles.orderItemCount}>{order.order_items?.length || 0} items</Text>
+                      <View style={[styles.orderStatusBadge, { backgroundColor: getStatusColor(order.status) }]}>
+                        <Text style={styles.orderStatusText}>{getStatusLabel(order.status)}</Text>
+                      </View>
                     </View>
                   </TouchableOpacity>
                 );
@@ -338,25 +558,7 @@ export default function AdminDashboardScreen({ navigation }) {
                   )}
                   <View style={styles.productAnalyticsInfo}>
                     <Text style={styles.productName} numberOfLines={1}>{product.name}</Text>
-                    <View style={styles.productStats}>
-                      <View style={styles.productStat}>
-                        <Text style={styles.productStatValue}>{product.total_quantity_sold || 0}</Text>
-                        <Text style={styles.productStatLabel}>Sold</Text>
-                      </View>
-                      <View style={styles.productStat}>
-                        <Text style={styles.productStatValue}>{product.unique_customers || 0}</Text>
-                        <Text style={styles.productStatLabel}>Buyers</Text>
-                      </View>
-                      <View style={styles.productStat}>
-                        <Text style={styles.productStatValue}>{product.total_orders || 0}</Text>
-                        <Text style={styles.productStatLabel}>Orders</Text>
-                      </View>
-                    </View>
-                    {product.top_customers?.length > 0 && (
-                      <Text style={styles.topBuyerText}>
-                        Top Buyer: {product.top_customers[0]?.full_name || product.top_customers[0]?.email}
-                      </Text>
-                    )}
+                    <Text style={styles.productOrderCount}>{product.total_orders || 0} Orders</Text>
                   </View>
                 </View>
               ))
@@ -366,7 +568,15 @@ export default function AdminDashboardScreen({ navigation }) {
 
         {activeTab === 'users' && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Users & Loyalty Points ({users.length})</Text>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Users & Loyalty Points ({users.length})</Text>
+              <TouchableOpacity 
+                style={styles.createAdminBtn}
+                onPress={() => setCreateAdminModalVisible(true)}
+              >
+                <Text style={styles.createAdminBtnText}>+ Add Admin</Text>
+              </TouchableOpacity>
+            </View>
             {users.length === 0 ? (
               <Text style={styles.emptyText}>No users found</Text>
             ) : (
@@ -378,13 +588,28 @@ export default function AdminDashboardScreen({ navigation }) {
                     </Text>
                   </View>
                   <View style={styles.userInfo}>
-                    <Text style={styles.userName}>{user.full_name || 'No Name'}</Text>
+                    <View style={styles.userNameRow}>
+                      <Text style={styles.userName}>{user.full_name || 'No Name'}</Text>
+                      {user.is_admin && (
+                        <View style={styles.adminBadge}>
+                          <Text style={styles.adminBadgeText}>Admin</Text>
+                        </View>
+                      )}
+                    </View>
                     <Text style={styles.userEmail}>{user.email}</Text>
                     <Text style={styles.userPhone}>{user.phone || 'No phone'}</Text>
                   </View>
-                  <View style={styles.userPoints}>
-                    <Text style={styles.pointsValue}>{user.points || 0}</Text>
-                    <Text style={styles.pointsLabel}>Points</Text>
+                  <View style={styles.userActions}>
+                    <View style={styles.userPoints}>
+                      <Text style={styles.pointsValue}>{user.points || 0}</Text>
+                      <Text style={styles.pointsLabel}>Points</Text>
+                    </View>
+                    <TouchableOpacity 
+                      style={styles.deleteUserBtn}
+                      onPress={() => handleDeleteUser(user)}
+                    >
+                      <Text style={styles.deleteUserBtnText}>Delete</Text>
+                    </TouchableOpacity>
                   </View>
                 </View>
               ))
@@ -441,14 +666,42 @@ export default function AdminDashboardScreen({ navigation }) {
                   </Text>
                 </View>
 
+                {/* Order Status */}
+                <View style={styles.modalSection}>
+                  <Text style={styles.modalSectionTitle}>Order Status</Text>
+                  <View style={styles.currentStatusRow}>
+                    <Text style={styles.currentStatusLabel}>Current Status:</Text>
+                    <View style={[styles.currentStatusBadge, { backgroundColor: getStatusColor(selectedOrder.status) }]}>
+                      <Text style={styles.currentStatusText}>{getStatusLabel(selectedOrder.status)}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.changeStatusLabel}>Change Status:</Text>
+                  <View style={styles.statusButtonsContainer}>
+                    {['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'].map((status) => (
+                      <TouchableOpacity
+                        key={status}
+                        style={[
+                          styles.statusButton,
+                          { backgroundColor: getStatusColor(status) },
+                          selectedOrder.status === status && styles.statusButtonActive
+                        ]}
+                        onPress={() => handleUpdateOrderStatus(selectedOrder.id, status)}
+                        disabled={selectedOrder.status === status}
+                      >
+                        <Text style={styles.statusButtonText}>{getStatusLabel(status)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
                 {/* Order Items */}
                 <View style={styles.modalSection}>
                   <Text style={styles.modalSectionTitle}>Order Items</Text>
                   {selectedOrder.order_items?.map((item, index) => (
                     <View key={index} style={styles.orderItemCard}>
-                      {item.product?.image_path ? (
+                      {item.product_image ? (
                         <Image
-                          source={{ uri: item.product.image_path.startsWith('http') ? item.product.image_path : `${API_URL}${item.product.image_path}` }}
+                          source={{ uri: item.product_image.startsWith('http') ? item.product_image : `${API_URL}${item.product_image}` }}
                           style={styles.orderItemImage}
                         />
                       ) : (
@@ -457,7 +710,7 @@ export default function AdminDashboardScreen({ navigation }) {
                         </View>
                       )}
                       <View style={styles.orderItemInfo}>
-                        <Text style={styles.orderItemName}>{item.product_name || item.product?.name}</Text>
+                        <Text style={styles.orderItemName}>{item.product_name}</Text>
                         <Text style={styles.orderItemQty}>Qty: {item.quantity}</Text>
                         {item.size_ordered && <Text style={styles.orderItemSize}>Size: {item.size_ordered}</Text>}
                       </View>
@@ -468,6 +721,132 @@ export default function AdminDashboardScreen({ navigation }) {
                 <View style={{ height: 100 }} />
               </ScrollView>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Create Admin Modal */}
+      <Modal
+        visible={createAdminModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setCreateAdminModalVisible(false)}
+      >
+        <View style={styles.centeredModalOverlay}>
+          <View style={styles.centeredModalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Create New Admin</Text>
+              <TouchableOpacity onPress={() => setCreateAdminModalVisible(false)}>
+                <Text style={styles.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.createAdminForm}>
+              <Text style={styles.inputLabel}>Full Name *</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Enter admin name"
+                value={newAdminName}
+                onChangeText={setNewAdminName}
+                editable={!creatingAdmin}
+              />
+
+              <Text style={styles.inputLabel}>Email *</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Enter admin email"
+                value={newAdminEmail}
+                onChangeText={setNewAdminEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                editable={!creatingAdmin}
+              />
+
+              <Text style={styles.inputLabel}>Password *</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Enter password (min 6 characters)"
+                value={newAdminPassword}
+                onChangeText={setNewAdminPassword}
+                secureTextEntry
+                editable={!creatingAdmin}
+              />
+
+              <TouchableOpacity
+                style={[styles.createAdminSubmitBtn, creatingAdmin && styles.disabledBtn]}
+                onPress={handleCreateAdmin}
+                disabled={creatingAdmin}
+              >
+                {creatingAdmin ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.createAdminSubmitBtnText}>Create Admin</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Change Password Modal */}
+      <Modal
+        visible={changePasswordModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setChangePasswordModalVisible(false)}
+      >
+        <View style={styles.centeredModalOverlay}>
+          <View style={styles.centeredModalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Change Password</Text>
+              <TouchableOpacity onPress={() => setChangePasswordModalVisible(false)}>
+                <Text style={styles.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.createAdminForm}>
+              <Text style={styles.inputLabel}>Current Password *</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Enter current password"
+                value={currentPassword}
+                onChangeText={setCurrentPassword}
+                secureTextEntry
+                editable={!changingPassword}
+              />
+
+              <Text style={styles.inputLabel}>New Password *</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Enter new password (min 6 characters)"
+                value={newPassword}
+                onChangeText={setNewPassword}
+                secureTextEntry
+                editable={!changingPassword}
+              />
+
+              <Text style={styles.inputLabel}>Confirm New Password *</Text>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Confirm new password"
+                value={confirmNewPassword}
+                onChangeText={setConfirmNewPassword}
+                secureTextEntry
+                editable={!changingPassword}
+              />
+
+              <TouchableOpacity
+                style={[styles.createAdminSubmitBtn, changingPassword && styles.disabledBtn]}
+                onPress={handleChangePassword}
+                disabled={changingPassword}
+              >
+                {changingPassword ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.createAdminSubmitBtnText}>Change Password</Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -508,6 +887,19 @@ const styles = StyleSheet.create({
     color: '#fff',
     opacity: 0.8,
     marginTop: 2,
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  headerBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   logoutBtn: {
     width: 40,
@@ -657,6 +1049,18 @@ const styles = StyleSheet.create({
     color: '#999',
     marginTop: 2,
   },
+  orderStatusBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  orderStatusText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
   orderFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -737,6 +1141,12 @@ const styles = StyleSheet.create({
   },
   productAnalyticsInfo: {
     flex: 1,
+  },
+  productOrderCount: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#2874f0',
+    marginTop: 4,
   },
   productStats: {
     flexDirection: 'row',
@@ -886,6 +1296,51 @@ const styles = StyleSheet.create({
     color: '#212121',
     lineHeight: 20,
   },
+  currentStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  currentStatusLabel: {
+    fontSize: 14,
+    color: '#666',
+    marginRight: 10,
+  },
+  currentStatusBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  currentStatusText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  changeStatusLabel: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 10,
+  },
+  statusButtonsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  statusButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginBottom: 4,
+  },
+  statusButtonActive: {
+    opacity: 0.5,
+  },
+  statusButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
   orderItemCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -952,5 +1407,109 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     color: '#2874f0',
+  },
+  // Create Admin Button Styles
+  createAdminBtn: {
+    backgroundColor: '#4caf50',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  createAdminBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  // Admin Badge
+  userNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  adminBadge: {
+    backgroundColor: '#2874f0',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 8,
+  },
+  adminBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  // User Actions
+  userActions: {
+    alignItems: 'flex-end',
+  },
+  deleteUserBtn: {
+    backgroundColor: '#f44336',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
+    marginTop: 8,
+  },
+  deleteUserBtnText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  // Centered Modal Overlay
+  centeredModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  centeredModalContent: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    width: '100%',
+    maxWidth: 400,
+    maxHeight: '80%',
+  },
+  // Create Admin Modal (legacy)
+  createAdminModalContent: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '70%',
+    width: '100%',
+    position: 'absolute',
+    bottom: 0,
+  },
+  createAdminForm: {
+    padding: 20,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 6,
+    marginTop: 12,
+  },
+  formInput: {
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  createAdminSubmitBtn: {
+    backgroundColor: '#2874f0',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 24,
+  },
+  createAdminSubmitBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  disabledBtn: {
+    opacity: 0.6,
   },
 });

@@ -17,7 +17,7 @@ from .schemas import (
     ProductCreate, ProductUpdate, ProductResponse,
     CartItemCreate, CartItemUpdate, CartItemResponse,
     OrderCreate, OrderCreateDirect, OrderResponse,
-    AdminOfferCreate, AdminOfferResponse
+    AdminOfferCreate, AdminOfferResponse, AdminCreate, AdminChangePassword
 )
 from .auth import (
     get_password_hash, verify_password, create_access_token, decode_token
@@ -762,6 +762,74 @@ def delete_user(
     db.delete(user)
     db.commit()
     return {"message": f"User {user.email} deleted successfully"}
+
+@app.post("/api/admin/create-admin", response_model=UserResponse, tags=["Admin - User Management"])
+def create_admin_user(
+    admin_data: AdminCreate,
+    admin_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new admin user (admin only).
+    
+    **Required Fields:**
+    - email: Valid email address
+    - password: Minimum 6 characters
+    - full_name: Admin's full name
+    
+    **Returns:** The newly created admin user
+    """
+    # Check if email already exists
+    existing_user = db.query(User).filter(User.email == admin_data.email.lower()).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create new admin user
+    hashed_password = get_password_hash(admin_data.password)
+    new_admin = User(
+        email=admin_data.email.lower(),
+        hashed_password=hashed_password,
+        full_name=admin_data.full_name,
+        is_admin=True,
+        is_profile_complete=True
+    )
+    
+    db.add(new_admin)
+    db.commit()
+    db.refresh(new_admin)
+    
+    return new_admin
+
+@app.put("/api/admin/change-password", tags=["Admin - User Management"])
+def change_admin_password(
+    password_data: AdminChangePassword,
+    admin_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Change the current admin's password.
+    
+    **Required Fields:**
+    - current_password: Current password for verification
+    - new_password: New password (minimum 6 characters)
+    
+    **Returns:** Success message
+    """
+    # Verify current password
+    if not verify_password(password_data.current_password, admin_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+    
+    # Update password
+    admin_user.hashed_password = get_password_hash(password_data.new_password)
+    db.commit()
+    
+    return {"message": "Password changed successfully"}
 
 @app.get(
     "/api/admin/stats",
@@ -1764,22 +1832,63 @@ def get_order(
     
     return order
 
-@app.get("/api/admin/orders", response_model=List[OrderResponse])
+@app.get("/api/admin/orders")
 def get_all_orders_admin(
     status: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Admin: Get all orders"""
+    """Admin: Get all orders with product images"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    query = db.query(Order)
+    query = db.query(Order).options(joinedload(Order.order_items).joinedload(OrderItem.product))
     if status:
         query = query.filter(Order.status == status)
     
     orders = query.order_by(Order.created_at.desc()).all()
-    return orders
+    
+    # Build response with product images
+    result = []
+    for order in orders:
+        order_dict = {
+            "id": order.id,
+            "user_id": order.user_id,
+            "order_number": order.order_number,
+            "total_amount": order.total_amount,
+            "original_amount": order.original_amount,
+            "discount_amount": order.discount_amount,
+            "status": order.status,
+            "delivery_address": order.delivery_address,
+            "delivery_city": order.delivery_city,
+            "delivery_state": order.delivery_state,
+            "delivery_pincode": order.delivery_pincode,
+            "delivery_phone": order.delivery_phone,
+            "order_date": order.order_date,
+            "order_time": order.order_time,
+            "order_day": order.order_day,
+            "points_earned": order.points_earned or 0,
+            "created_at": order.created_at,
+            "order_items": []
+        }
+        
+        for item in order.order_items:
+            item_dict = {
+                "id": item.id,
+                "product_id": item.product_id,
+                "product_name": item.product_name,
+                "product_image": item.product.image_path if item.product else None,
+                "quantity": item.quantity,
+                "price_at_purchase": item.price_at_purchase,
+                "original_price": item.original_price,
+                "discount_percent": item.discount_percent,
+                "size_ordered": item.size_ordered
+            }
+            order_dict["order_items"].append(item_dict)
+        
+        result.append(order_dict)
+    
+    return result
 
 @app.get(
     "/api/admin/sales-analytics",
@@ -1938,7 +2047,7 @@ def update_order_status(
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    valid_statuses = ["pending", "confirmed", "shipped", "delivered", "cancelled"]
+    valid_statuses = ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"]
     if status not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
     
@@ -2073,63 +2182,44 @@ def get_product_analytics(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Admin: Get product analytics with customer details"""
+    """Admin: Get all products with order analytics"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    from sqlalchemy import func, distinct
+    from sqlalchemy import func, distinct, or_
+    from sqlalchemy.orm import aliased
     
-    # Get products with order stats and customer details
-    products_query = db.query(
-        Product.id,
-        Product.name,
-        Product.image_url,
-        Product.price,
-        func.count(distinct(Order.user_id)).label('unique_customers'),
-        func.count(OrderItem.id).label('total_orders'),
-        func.sum(OrderItem.quantity).label('total_quantity_sold')
-    ).join(OrderItem, Product.id == OrderItem.product_id)\
-     .join(Order, OrderItem.order_id == Order.id)\
-     .group_by(Product.id)\
-     .order_by(func.sum(OrderItem.quantity).desc())\
-     .all()
+    # Get ALL products with their order stats
+    products = db.query(Product).filter(Product.is_active == True).all()
     
     result = []
-    for product in products_query:
-        # Get customers who ordered this product
-        customers = db.query(
-            User.id,
-            User.email,
-            User.full_name,
-            func.sum(OrderItem.quantity).label('quantity_ordered'),
-            func.count(Order.id).label('order_count')
-        ).join(Order, User.id == Order.user_id)\
-         .join(OrderItem, Order.id == OrderItem.order_id)\
-         .filter(OrderItem.product_id == product.id)\
-         .group_by(User.id)\
-         .order_by(func.sum(OrderItem.quantity).desc())\
-         .limit(10)\
-         .all()
+    for product in products:
+        # Count orders for this product - match by product_id OR product_name (for hardcoded products)
+        order_stats = db.query(
+            func.count(distinct(Order.user_id)).label('unique_customers'),
+            func.count(OrderItem.id).label('total_orders'),
+            func.coalesce(func.sum(OrderItem.quantity), 0).label('total_quantity_sold')
+        ).select_from(OrderItem)\
+         .join(Order, OrderItem.order_id == Order.id)\
+         .filter(
+             or_(
+                 OrderItem.product_id == product.id,
+                 OrderItem.product_name == product.name
+             )
+         )\
+         .first()
         
         result.append({
             "id": product.id,
             "name": product.name,
-            "image_url": product.image_url,
-            "price": product.price,
-            "unique_customers": product.unique_customers,
-            "total_orders": product.total_orders,
-            "total_quantity_sold": product.total_quantity_sold or 0,
-            "top_customers": [
-                {
-                    "id": c.id,
-                    "email": c.email,
-                    "full_name": c.full_name,
-                    "quantity_ordered": c.quantity_ordered or 0,
-                    "order_count": c.order_count
-                }
-                for c in customers
-            ]
+            "image_url": product.image_path,
+            "unique_customers": order_stats.unique_customers if order_stats else 0,
+            "total_orders": order_stats.total_orders if order_stats else 0,
+            "total_quantity_sold": order_stats.total_quantity_sold if order_stats else 0,
         })
+    
+    # Sort by total_orders descending (products with most orders first)
+    result.sort(key=lambda x: x['total_orders'], reverse=True)
     
     return result
 
